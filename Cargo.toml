@@ -1,0 +1,21 @@
+[package]
+name = "interrupt-ref-cell"
+version = "0.1.0"
+authors = ["Martin Kröning <mkroening@posteo.net>"]
+edition = "2021"
+description = "A `RefCell` for sharing data with interrupt handlers or signal handlers on the same thread."
+repository = "https://github.com/mkroening/interrupt-ref-cell"
+license = "MIT OR Apache-2.0"
+keywords = ["interrupts", "signals", "disable", "without"]
+categories = ["no-std::no-alloc", "os::unix-apis"]
+
+[dependencies]
+interrupts = "0.1"
+
+[dev-dependencies]
+nix = { version = "0.27", features = ["signal"] }
+
+[features]
+# Make `InterruptRefCell` store additional debugging information, which is printed out when
+# a borrow error occurs
+debug_interruptrefcell = []
