@@ -42,9 +42,10 @@ impl<T> DerefMut for InterruptDropper<T> {
 impl<T> Drop for InterruptDropper<T> {
     #[inline]
     fn drop(&mut self) {
-        let _guard = interrupts::disable();
+        let guard = interrupts::disable();
         // Drop `inner` as while we can guarentee interrupts are disabled
         // SAFETY: This is not exposed to safe code and is not called more than once
         unsafe { ManuallyDrop::drop(&mut self.inner) }
+        drop(guard);
     }
 }
