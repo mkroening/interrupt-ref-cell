@@ -64,13 +64,14 @@
 
 #[cfg(not(target_os = "none"))]
 mod local_key;
+
 use core::cell::{BorrowError, BorrowMutError, Ref, RefCell, RefMut};
 use core::cmp::Ordering;
 use core::ops::{Deref, DerefMut};
 use core::{fmt, mem};
 
 #[cfg(not(target_os = "none"))]
-pub use local_key::LocalKeyExt;
+pub use self::local_key::LocalKeyExt;
 
 /// A mutable memory location with dynamically checked borrow rules
 ///
