@@ -1,6 +1,6 @@
 [package]
 name = "interrupt-ref-cell"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Martin Kröning <mkroening@posteo.net>"]
 edition = "2021"
 description = "A `RefCell` for sharing data with interrupt handlers or signal handlers on the same thread."
