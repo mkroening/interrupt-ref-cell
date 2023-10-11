@@ -62,15 +62,18 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
+mod interrupt_dropper;
 #[cfg(not(target_os = "none"))]
 mod local_key;
+
 use core::cell::{BorrowError, BorrowMutError, Ref, RefCell, RefMut};
 use core::cmp::Ordering;
 use core::ops::{Deref, DerefMut};
 use core::{fmt, mem};
 
+use self::interrupt_dropper::InterruptDropper;
 #[cfg(not(target_os = "none"))]
-pub use local_key::LocalKeyExt;
+pub use self::local_key::LocalKeyExt;
 
 /// A mutable memory location with dynamically checked borrow rules
 ///
@@ -263,10 +266,11 @@ impl<T: ?Sized> InterruptRefCell<T> {
     #[inline]
     #[cfg_attr(feature = "debug_interruptrefcell", track_caller)]
     pub fn try_borrow(&self) -> Result<InterruptRef<'_, T>, BorrowError> {
-        let _guard = interrupts::disable();
-        self.inner
-            .try_borrow()
-            .map(|inner| InterruptRef { inner, _guard })
+        let guard = interrupts::disable();
+        self.inner.try_borrow().map(|inner| {
+            let inner = InterruptDropper::from(inner);
+            InterruptRef { inner, guard }
+        })
     }
 
     /// Mutably borrows the wrapped value.
@@ -333,10 +337,11 @@ impl<T: ?Sized> InterruptRefCell<T> {
     #[inline]
     #[cfg_attr(feature = "debug_interruptrefcell", track_caller)]
     pub fn try_borrow_mut(&self) -> Result<InterruptRefMut<'_, T>, BorrowMutError> {
-        let _guard = interrupts::disable();
-        self.inner
-            .try_borrow_mut()
-            .map(|inner| InterruptRefMut { inner, _guard })
+        let guard = interrupts::disable();
+        self.inner.try_borrow_mut().map(|inner| {
+            let inner = InterruptDropper::from(inner);
+            InterruptRefMut { inner, guard }
+        })
     }
 
     /// Returns a raw pointer to the underlying data in this cell.
@@ -416,7 +421,10 @@ impl<T: ?Sized> InterruptRefCell<T> {
     /// ```
     #[inline]
     pub unsafe fn try_borrow_unguarded(&self) -> Result<&T, BorrowError> {
-        self.inner.try_borrow_unguarded()
+        let guard = interrupts::disable();
+        let ret = self.inner.try_borrow_unguarded();
+        drop(guard);
+        ret
     }
 }
 
@@ -547,8 +555,8 @@ impl<T> From<T> for InterruptRefCell<T> {
 ///
 /// See the [module-level documentation](self) for more.
 pub struct InterruptRef<'b, T: ?Sized + 'b> {
-    inner: Ref<'b, T>,
-    _guard: interrupts::Guard,
+    inner: InterruptDropper<Ref<'b, T>>,
+    guard: interrupts::Guard,
 }
 
 impl<T: ?Sized> Deref for InterruptRef<'_, T> {
@@ -573,10 +581,9 @@ impl<'b, T: ?Sized> InterruptRef<'b, T> {
     #[must_use]
     #[inline]
     pub fn clone(orig: &InterruptRef<'b, T>) -> InterruptRef<'b, T> {
-        InterruptRef {
-            inner: Ref::clone(&orig.inner),
-            _guard: interrupts::disable(),
-        }
+        let guard = interrupts::disable();
+        let inner = InterruptDropper::from(Ref::clone(&orig.inner));
+        InterruptRef { inner, guard }
     }
 
     /// Makes a new `InterruptRef` for a component of the borrowed data.
@@ -602,11 +609,9 @@ impl<'b, T: ?Sized> InterruptRef<'b, T> {
     where
         F: FnOnce(&T) -> &U,
     {
-        let InterruptRef { inner, _guard } = orig;
-        InterruptRef {
-            inner: Ref::map(inner, f),
-            _guard,
-        }
+        let InterruptRef { inner, guard } = orig;
+        let inner = InterruptDropper::from(Ref::map(InterruptDropper::into_inner(inner), f));
+        InterruptRef { inner, guard }
     }
 
     /// Makes a new `InterruptRef` for an optional component of the borrowed data. The
@@ -638,10 +643,24 @@ impl<'b, T: ?Sized> InterruptRef<'b, T> {
     where
         F: FnOnce(&T) -> Option<&U>,
     {
-        let InterruptRef { inner, _guard } = orig;
-        match Ref::filter_map(inner, f) {
-            Ok(inner) => Ok(InterruptRef { inner, _guard }),
-            Err(inner) => Err(InterruptRef { inner, _guard }),
+        let guard = interrupts::disable();
+        let filter_map = Ref::filter_map(InterruptDropper::into_inner(orig.inner), f);
+        drop(guard);
+        match filter_map {
+            Ok(inner) => {
+                let inner = InterruptDropper::from(inner);
+                Ok(InterruptRef {
+                    inner,
+                    guard: orig.guard,
+                })
+            }
+            Err(inner) => {
+                let inner = InterruptDropper::from(inner);
+                Err(InterruptRef {
+                    inner,
+                    guard: orig.guard,
+                })
+            }
         }
     }
 
@@ -673,15 +692,16 @@ impl<'b, T: ?Sized> InterruptRef<'b, T> {
     where
         F: FnOnce(&T) -> (&U, &V),
     {
-        let (a, b) = Ref::map_split(orig.inner, f);
+        let guard = interrupts::disable();
+        let (a, b) = Ref::map_split(InterruptDropper::into_inner(orig.inner), f);
         (
             InterruptRef {
-                inner: a,
-                _guard: orig._guard,
+                inner: InterruptDropper::from(a),
+                guard,
             },
             InterruptRef {
-                inner: b,
-                _guard: interrupts::disable(),
+                inner: InterruptDropper::from(b),
+                guard: orig.guard,
             },
         )
     }
@@ -728,11 +748,9 @@ impl<'b, T: ?Sized> InterruptRefMut<'b, T> {
     where
         F: FnOnce(&mut T) -> &mut U,
     {
-        let InterruptRefMut { inner, _guard } = orig;
-        InterruptRefMut {
-            inner: RefMut::map(inner, f),
-            _guard,
-        }
+        let InterruptRefMut { inner, guard } = orig;
+        let inner = InterruptDropper::from(RefMut::map(InterruptDropper::into_inner(inner), f));
+        InterruptRefMut { inner, guard }
     }
 
     /// Makes a new `InterruptRefMut` for an optional component of the borrowed data. The
@@ -772,10 +790,24 @@ impl<'b, T: ?Sized> InterruptRefMut<'b, T> {
     where
         F: FnOnce(&mut T) -> Option<&mut U>,
     {
-        let InterruptRefMut { inner, _guard } = orig;
-        match RefMut::filter_map(inner, f) {
-            Ok(inner) => Ok(InterruptRefMut { inner, _guard }),
-            Err(inner) => Err(InterruptRefMut { inner, _guard }),
+        let guard = interrupts::disable();
+        let filter_map = RefMut::filter_map(InterruptDropper::into_inner(orig.inner), f);
+        drop(guard);
+        match filter_map {
+            Ok(inner) => {
+                let inner = InterruptDropper::from(inner);
+                Ok(InterruptRefMut {
+                    inner,
+                    guard: orig.guard,
+                })
+            }
+            Err(inner) => {
+                let inner = InterruptDropper::from(inner);
+                Err(InterruptRefMut {
+                    inner,
+                    guard: orig.guard,
+                })
+            }
         }
     }
 
@@ -812,15 +844,16 @@ impl<'b, T: ?Sized> InterruptRefMut<'b, T> {
     where
         F: FnOnce(&mut T) -> (&mut U, &mut V),
     {
-        let (a, b) = RefMut::map_split(orig.inner, f);
+        let guard = interrupts::disable();
+        let (a, b) = RefMut::map_split(InterruptDropper::into_inner(orig.inner), f);
         (
             InterruptRefMut {
-                inner: a,
-                _guard: orig._guard,
+                inner: InterruptDropper::from(a),
+                guard,
             },
             InterruptRefMut {
-                inner: b,
-                _guard: interrupts::disable(),
+                inner: InterruptDropper::from(b),
+                guard: orig.guard,
             },
         )
     }
@@ -830,8 +863,8 @@ impl<'b, T: ?Sized> InterruptRefMut<'b, T> {
 ///
 /// See the [module-level documentation](self) for more.
 pub struct InterruptRefMut<'b, T: ?Sized + 'b> {
-    inner: RefMut<'b, T>,
-    _guard: interrupts::Guard,
+    inner: InterruptDropper<RefMut<'b, T>>,
+    guard: interrupts::Guard,
 }
 
 impl<T: ?Sized> Deref for InterruptRefMut<'_, T> {
